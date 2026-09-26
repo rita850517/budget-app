@@ -495,6 +495,7 @@
 <div id="fatal-error-box" style="display:none;position:fixed;inset:0;background:#14171C;color:#F3F1EA;padding:24px;font-family:monospace;font-size:13px;white-space:pre-wrap;overflow:auto;z-index:9999;">
   <div style="color:#E2624F;font-weight:bold;font-size:15px;margin-bottom:12px;">程式發生錯誤,請截圖這個畫面給 Claude:</div>
   <div id="fatal-error-text"></div>
+  <button onclick="document.getElementById('fatal-error-box').style.display='none';" style="margin-top:20px;background:#E3B45B;border:none;color:#1B1607;font-weight:700;padding:10px 20px;border-radius:10px;font-size:14px;">關閉,繼續使用</button>
 </div>
 <div id="dailyModalRoot"></div>
 <div class="toast" id="toast"></div>
@@ -508,11 +509,13 @@
     }catch(e){ /* ignore */ }
   }
   window.addEventListener('error', (e)=>{
-    if(e.message==='Script error.' && !e.filename && !(e.error && e.error.stack)) return; // 無資訊的跨源/背景快照誤觸發,忽略
+    if((e.message||'').includes('Script error')) return; // 無資訊的跨源/背景快照誤觸發,忽略
     showFatalError((e.message||'unknown error') + '\n' + (e.error && e.error.stack ? e.error.stack : ''));
   });
   window.addEventListener('unhandledrejection', (e)=>{
-    showFatalError('Promise rejection: ' + (e.reason && e.reason.stack ? e.reason.stack : e.reason));
+    const reasonText = (e.reason && e.reason.stack ? e.reason.stack : String(e.reason));
+    if(reasonText.includes('Script error')) return;
+    showFatalError('Promise rejection: ' + reasonText);
   });
 
   const STORAGE_KEY = 'budget-app-data';
@@ -1379,7 +1382,9 @@
       await saveData();
       checkDailyModal();
     }catch(err){
-      showFatalError((err && err.message ? err.message : String(err)) + '\n' + (err && err.stack ? err.stack : ''));
+      const msg = (err && err.message ? err.message : String(err));
+      if(msg.includes('Script error')) { /* 無資訊的跨源/背景快照誤觸發,忽略 */ }
+      else showFatalError(msg + '\n' + (err && err.stack ? err.stack : ''));
     }
   })();
 })();
