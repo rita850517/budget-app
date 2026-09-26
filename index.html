@@ -508,6 +508,7 @@
     }catch(e){ /* ignore */ }
   }
   window.addEventListener('error', (e)=>{
+    if(e.message==='Script error.' && !e.filename && !(e.error && e.error.stack)) return; // 無資訊的跨源/背景快照誤觸發,忽略
     showFatalError((e.message||'unknown error') + '\n' + (e.error && e.error.stack ? e.error.stack : ''));
   });
   window.addEventListener('unhandledrejection', (e)=>{
