@@ -368,6 +368,7 @@
         <div class="chip-row" style="margin-bottom:10px;">
           <button type="button" class="mode-btn active" data-mode="expense">支出</button>
           <button type="button" class="mode-btn" data-mode="income">收入</button>
+          <button type="button" class="mode-btn" data-mode="cardpay">繳卡費</button>
         </div>
         <div class="add-row">
           <input type="number" id="t-input-amount" inputmode="decimal" placeholder="金額">
@@ -375,12 +376,19 @@
           <button class="btn-add" id="t-add-btn">＋</button>
         </div>
         <div class="two-in-row" style="margin-top:8px;">
-          <div>
+          <div id="t-expense-src-wrap">
             <select id="t-input-expense-account" class="acc-select"></select>
           </div>
           <div>
             <input type="date" id="t-input-date" class="acc-select">
           </div>
+        </div>
+        <div id="t-cardpay-wrap" style="display:none;margin-top:8px;">
+          <div class="two-in-row">
+            <div><select id="t-input-cardpay-card" class="acc-select"></select></div>
+            <div><select id="t-input-cardpay-bank" class="acc-select"></select></div>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-dim);margin-top:6px;">左:繳哪張卡 ／ 右:從哪個帳戶扣款</div>
         </div>
         <div id="t-income-account-wrap" style="display:none;margin-top:8px;">
           <select id="t-input-account" class="acc-select" style="width:100%;"></select>
@@ -468,6 +476,12 @@
         <label>保險費(分期)</label>
         <div id="c-ins-mine"></div>
         <div id="c-ins-spouse"></div>
+      </div>
+
+      <div class="field">
+        <label>信用卡(刷卡先記在卡片上,記「繳卡費」才從帳戶扣)</label>
+        <div id="c-cards-list"></div>
+        <button class="btn-ghost" id="c-add-card" type="button">＋ 新增信用卡</button>
       </div>
 
       <div class="field">
@@ -612,7 +626,7 @@
     return (Number(settings.income)||0) + balanceTotal - fixedTotal - (Number(settings.filial)||0) - (Number(settings.savings)||0) - (Number(settings.reserve)||0) - customTotal - repayment - insTotal - loanTotal;
   }
 
-  function isExpenseTx(t){ return t.type !== 'income' && !t.loanItemId; }
+  function isExpenseTx(t){ return t.type !== 'income' && t.type !== 'cardpay' && !t.loanItemId; }
   function isIncomeTx(t){ return t.type === 'income'; }
   function incomeTxTotalForMonth(monthKey){
     return (data.tx[monthKey]||[]).filter(isIncomeTx).reduce((s,t)=>s+t.amount,0);
@@ -644,6 +658,46 @@
   }
   function totalPendingReimburseAmount(){
     return getAllPendingReimbursements().reduce((s,t)=>s+t.amount,0);
+  }
+  // ---------- 信用卡 ----------
+  function cardNameById(id){
+    const c = ((data.settings && data.settings.cards)||[]).find(x=>x.id===id);
+    return c ? c.name : '已刪除的卡';
+  }
+  function ymdStr(y,m,d){ return y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0'); }
+  function lastClosingDate(closingDay, todayStr){
+    const [y,m,d] = todayStr.split('-').map(Number);
+    const clamp = (yy,mm)=> Math.min(closingDay, new Date(yy,mm,0).getDate());
+    if(d >= clamp(y,m)) return ymdStr(y,m,clamp(y,m));
+    let pm = m-1, py = y;
+    if(pm===0){ pm = 12; py = y-1; }
+    return ymdStr(py,pm,clamp(py,pm));
+  }
+  function cardStats(card){
+    const closing = Number(card.closingDay)||0;
+    const cd = closing ? lastClosingDate(closing, todayISO()) : null;
+    let charges = Number(card.opening)||0, unbilled = 0, payments = 0;
+    Object.keys(data.tx).forEach(mk=>{
+      (data.tx[mk]||[]).forEach(t=>{
+        if(t.cardId !== card.id) return;
+        if(t.type === 'cardpay') payments += t.amount;
+        else if(t.type !== 'income'){
+          charges += t.amount;
+          if(cd && t.date > cd) unbilled += t.amount;
+        }
+      });
+    });
+    const total = charges - payments;
+    const unbilledShown = cd ? Math.min(unbilled, Math.max(0,total)) : 0;
+    const billed = cd ? Math.max(0, total - unbilledShown) : total;
+    return {total, billed, unbilled: unbilledShown, hasClosing: !!cd};
+  }
+  function txNoteText(t){
+    if(t.type==='income') return (t.note||'收入') + (t.account ? `(存入${t.account})` : '');
+    if(t.type==='cardpay') return (t.note||'繳卡費') + `(${cardNameById(t.cardId)}←${t.account||'未指定帳戶'})`;
+    return (t.note||'花費')
+      + (t.cardId ? `(💳${cardNameById(t.cardId)})` : (t.account ? `(${t.account}扣款)` : ''))
+      + (t.loanItemId ? `[分期:${loanItemNameById(t.loanItemId)}]` : '');
   }
   function loanItemNameById(id){
     const item = (data.settings.loanItems||[]).find(li=>li.id===id);
@@ -1020,6 +1074,36 @@
   let settingsBalances = [];
   let settingsInsurance = { mine:{}, spouse:{} };
   let settingsLoanItems = [];
+  let settingsCards = [];
+  function renderCardsList(containerId, items, onChange){
+    const el = $(containerId);
+    el.innerHTML = '';
+    items.forEach((item, idx)=>{
+      const div = document.createElement('div');
+      div.className = 'mini-card';
+      div.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="mc-title">信用卡</div>
+          <button type="button" class="card-del" style="background:none;border:1px solid var(--line);color:var(--text-dim);border-radius:8px;padding:4px 10px;font-size:12px;">✕ 刪除</button>
+        </div>
+        <label>卡片名稱</label>
+        <input type="text" class="card-name" placeholder="例如:台新Richart" value="${item.name||''}">
+        <div class="two-in-row">
+          <div><label>結帳日(每月幾號,選填)</label><input type="number" class="card-closing" inputmode="numeric" placeholder="例如 15" value="${item.closingDay||''}"></div>
+          <div><label>目前已刷未繳金額</label><input type="number" class="card-opening" inputmode="decimal" placeholder="0" value="${item.opening||''}"></div>
+        </div>
+      `;
+      div.querySelector('.card-name').addEventListener('input', e=>{ item.name = e.target.value; onChange(); });
+      div.querySelector('.card-closing').addEventListener('input', e=>{ item.closingDay = e.target.value; onChange(); });
+      div.querySelector('.card-opening').addEventListener('input', e=>{ item.opening = e.target.value; onChange(); });
+      div.querySelector('.card-del').addEventListener('click', ()=>{
+        items.splice(idx,1);
+        renderCardsList(containerId, items, onChange);
+        onChange();
+      });
+      el.appendChild(div);
+    });
+  }
   function updateSettingsPreview(){
     const settings = {
       income: $('c-income').value,
@@ -1065,6 +1149,8 @@
     buildInsuranceCard('c-ins-spouse', '老公的保險', settingsInsurance.spouse, updateSettingsPreview);
     settingsLoanItems = (s.loanItems||[]).map(f=>({...f}));
     renderLoanItemsList('c-loanitems-list', settingsLoanItems, updateSettingsPreview);
+    settingsCards = (s.cards||[]).map(f=>({...f}));
+    renderCardsList('c-cards-list', settingsCards, updateSettingsPreview);
     updateSettingsPreview();
   }
   function initSettingsScreen(){
@@ -1083,6 +1169,10 @@
       settingsBalances.push({id:crypto.randomUUID(), name:'', amount:''});
       renderNamedAmountList('c-balances-list', settingsBalances, updateSettingsPreview, 'dl-account-names', '帳戶名稱(例如台新、LINE Bank)');
     });
+    $('c-add-card').addEventListener('click', ()=>{
+      settingsCards.push({id:crypto.randomUUID(), name:'', closingDay:'', opening:''});
+      renderCardsList('c-cards-list', settingsCards, updateSettingsPreview);
+    });
     $('c-add-loanitem').addEventListener('click', ()=>{
       settingsLoanItems.push({id:crypto.randomUUID(), name:'', card:'', total:'', installments:'', initialRemaining:'', perAmount:''});
       renderLoanItemsList('c-loanitems-list', settingsLoanItems, updateSettingsPreview);
@@ -1090,6 +1180,7 @@
     $('c-save').addEventListener('click', async ()=>{
       const customSavings = settingsCustomSavings.map(f=>({id:f.id, name:f.name||'未命名', amount:Number(f.amount)||0}));
       const balances = settingsBalances.map(f=>({id:f.id, name:f.name||'未命名', amount:Number(f.amount)||0}));
+      const cards = settingsCards.map(f=>({id:f.id, name:f.name||'未命名', closingDay:Number(f.closingDay)||0, opening:Number(f.opening)||0}));
       const loanItems = settingsLoanItems.map(f=>({id:f.id, name:f.name||'未命名', card:f.card||'', total:Number(f.total)||0, installments:Number(f.installments)||0, initialRemaining:Number(f.initialRemaining)||0, perAmount:Number(f.perAmount)||0}));
       rememberNames('savingsNameHistory', customSavings);
       rememberNames('accountNameHistory', balances);
@@ -1112,7 +1203,8 @@
           mine: { total:Number(settingsInsurance.mine.total)||0, installments:Number(settingsInsurance.mine.installments)||12, remaining:Number(settingsInsurance.mine.remaining)||0, perAmount:Number(settingsInsurance.mine.perAmount)||0 },
           spouse: { total:Number(settingsInsurance.spouse.total)||0, installments:Number(settingsInsurance.spouse.installments)||12, remaining:Number(settingsInsurance.spouse.remaining)||0, perAmount:Number(settingsInsurance.spouse.perAmount)||0 }
         },
-        loanItems: loanItems
+        loanItems: loanItems,
+        cards: cards
       };
       await saveData();
       showToast('已儲存');
@@ -1131,7 +1223,19 @@
     const tx = getMonthTx(mKey);
 
     const accNames = accountNameList(s.balances);
-    fillSelect($('t-input-expense-account'), accNames);
+    {
+      const srcSel = $('t-input-expense-account');
+      const prevSrc = srcSel.value;
+      const cards = s.cards || [];
+      srcSel.innerHTML = accNames.map(n=>`<option value="b:${n}">${n}</option>`).join('')
+        + cards.map(c=>`<option value="c:${c.id}">💳${c.name}</option>`).join('');
+      if([...srcSel.options].some(o=>o.value===prevSrc)) srcSel.value = prevSrc;
+      const cpCard = $('t-input-cardpay-card');
+      const prevCp = cpCard.value;
+      cpCard.innerHTML = cards.map(c=>`<option value="${c.id}">💳${c.name}</option>`).join('') || '<option value="">尚未新增信用卡</option>';
+      if([...cpCard.options].some(o=>o.value===prevCp)) cpCard.value = prevCp;
+      fillSelect($('t-input-cardpay-bank'), accNames);
+    }
     fillSelect($('t-input-account'), accNames, s.incomeAccount);
     if(!$('t-input-date').value) $('t-input-date').value = today;
     const loanItems = s.loanItems || [];
@@ -1174,7 +1278,7 @@
         row.className = 'tx-item';
         const time = new Date(t.ts).toLocaleTimeString('zh-Hant-TW',{hour:'2-digit',minute:'2-digit'});
         const income = isIncomeTx(t);
-        const noteText = income ? (t.note ? t.note : '收入') + (t.account ? `(存入${t.account})` : '') : (t.note ? t.note : '花費') + (t.account ? `(${t.account}扣款)` : '') + (t.loanItemId ? `[分期:${loanItemNameById(t.loanItemId)}]` : '');
+        const noteText = txNoteText(t);
         row.innerHTML = `
           <div>
             <div class="tx-note">${noteText}</div>
@@ -1226,8 +1330,15 @@
       const acc = accountInp.value.trim();
       tx.account = acc;
       if(acc) rememberNames('accountNameHistory', [{name:acc}]);
+    }else if(txMode==='cardpay'){
+      const cardId = $('t-input-cardpay-card').value;
+      if(!cardId){ showToast('請先到設定新增信用卡'); return; }
+      tx.cardId = cardId;
+      tx.account = $('t-input-cardpay-bank').value.trim();
     }else{
-      tx.account = expenseAccInp.value.trim();
+      const src = expenseAccInp.value || '';
+      if(src.startsWith('c:')){ tx.cardId = src.slice(2); tx.account = ''; }
+      else{ tx.account = src.startsWith('b:') ? src.slice(2).trim() : src.trim(); }
       tx.reimbursable = reimburseInp.checked;
       tx.receivedDate = null;
       reimburseInp.checked = false;
@@ -1319,6 +1430,22 @@
       }
       crEl.innerHTML = `<div class="h">循環信貸剩餘額度</div><div class="v num">$${fmt((s.credit.limit||0)-(s.credit.used||0))}</div>`;
     }
+    if((s.cards||[]).length){
+      let cardEl = $('m-cards');
+      if(!cardEl){
+        cardEl = document.createElement('div');
+        cardEl.id = 'm-cards';
+        cardEl.className = 'overview-card';
+        summary.insertAdjacentElement('afterend', cardEl);
+      }
+      cardEl.innerHTML = '<div class="h">信用卡未繳</div>' + s.cards.map(c=>{
+        const st = cardStats(c);
+        const detail = st.hasClosing
+          ? `待繳 $${fmt(st.billed)} / 未出帳 $${fmt(st.unbilled)}`
+          : `未繳合計 $${fmt(st.total)}`;
+        return `<div class="savings-list-item"><span>${c.name}${c.closingDay?'(結帳日'+c.closingDay+'號)':''}</span><span class="num">${detail}</span></div>`;
+      }).join('');
+    }
     if((s.loanItems||[]).length){
       let loanEl = $('m-loanitems');
       if(!loanEl){
@@ -1374,7 +1501,7 @@
         row.className = 'tx-item';
         const dstr = t.date.slice(5).replace('-','/');
         const income = isIncomeTx(t);
-        const noteText = income ? (t.note ? t.note : '收入') + (t.account ? `(存入${t.account})` : '') : (t.note ? t.note : '花費') + (t.account ? `(${t.account}扣款)` : '') + (t.loanItemId ? `[分期:${loanItemNameById(t.loanItemId)}]` : '');
+        const noteText = txNoteText(t);
         row.innerHTML = `
           <div>
             <div class="tx-note">${noteText}</div>
@@ -1419,11 +1546,14 @@
     btn.addEventListener('click', ()=>{
       txMode = btn.getAttribute('data-mode');
       document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active', b===btn));
-      $('t-income-account-wrap').style.display = txMode==='income' ? '' : 'none';
-      $('t-reimburse-wrap').style.display = txMode==='income' ? 'none' : '';
-      $('t-loan-check-wrap').style.display = txMode==='income' ? 'none' : '';
-      if(txMode==='income'){ $('t-input-is-loan').checked = false; $('t-loan-select-wrap').style.display = 'none'; }
-      $('t-input-amount').placeholder = txMode==='income' ? '收入金額' : '金額';
+      const isExp = txMode==='expense', isInc = txMode==='income', isPay = txMode==='cardpay';
+      $('t-income-account-wrap').style.display = isInc ? '' : 'none';
+      $('t-expense-src-wrap').style.display = isExp ? '' : 'none';
+      $('t-cardpay-wrap').style.display = isPay ? '' : 'none';
+      $('t-reimburse-wrap').style.display = isExp ? '' : 'none';
+      $('t-loan-check-wrap').style.display = isExp ? '' : 'none';
+      if(!isExp){ $('t-input-is-loan').checked = false; $('t-loan-select-wrap').style.display = 'none'; }
+      $('t-input-amount').placeholder = isInc ? '收入金額' : (isPay ? '繳款金額' : '金額');
     });
   });
   $('t-input-is-loan').addEventListener('change', ()=>{
