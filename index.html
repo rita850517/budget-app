@@ -327,6 +327,12 @@
         <div id="s-ins-spouse"></div>
       </div>
 
+      <div class="field">
+        <label>自訂分期項目(信用卡刷卡分期買的東西)</label>
+        <div id="s-loanitems-list"></div>
+        <button class="btn-ghost" id="s-add-loanitem" type="button">＋ 新增分期項目</button>
+      </div>
+
       <div class="preview">
         <div class="l">預估每天可花費</div>
         <div class="v num" id="s-preview">$0</div>
@@ -383,6 +389,13 @@
           <input type="checkbox" id="t-input-reimburse" style="width:16px;height:16px;">
           這筆是幫公司代墊,之後會收到還款
         </label>
+        <label id="t-loan-check-wrap" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-dim);margin-top:10px;">
+          <input type="checkbox" id="t-input-is-loan" style="width:16px;height:16px;">
+          這是分期付款
+        </label>
+        <div id="t-loan-select-wrap" style="display:none;margin-top:8px;">
+          <select id="t-input-loanitem" class="acc-select" style="width:100%;"></select>
+        </div>
       </div>
 
       <div id="t-pending-reimburse"></div>
@@ -457,6 +470,12 @@
         <div id="c-ins-spouse"></div>
       </div>
 
+      <div class="field">
+        <label>自訂分期項目(信用卡刷卡分期買的東西)</label>
+        <div id="c-loanitems-list"></div>
+        <button class="btn-ghost" id="c-add-loanitem" type="button">＋ 新增分期項目</button>
+      </div>
+
       <div class="preview">
         <div class="l">每天基準可花費(收入平均分配)</div>
         <div class="v num" id="c-preview">$0</div>
@@ -492,6 +511,7 @@
 </div>
 <datalist id="dl-savings-names"></datalist>
 <datalist id="dl-account-names"></datalist>
+<datalist id="dl-card-names"></datalist>
 <div id="fatal-error-box" style="display:none;position:fixed;inset:0;background:#14171C;color:#F3F1EA;padding:24px;font-family:monospace;font-size:13px;white-space:pre-wrap;overflow:auto;z-index:9999;">
   <div style="color:#E2624F;font-weight:bold;font-size:15px;margin-bottom:12px;">程式發生錯誤,請截圖這個畫面給 Claude:</div>
   <div id="fatal-error-text"></div>
@@ -551,6 +571,7 @@
     if(!data.tx) data.tx = {};
     if(!data.savingsNameHistory) data.savingsNameHistory = [];
     if(!data.accountNameHistory) data.accountNameHistory = [];
+    if(!data.cardNameHistory) data.cardNameHistory = [];
   }
   async function saveData(){
     try{
@@ -563,6 +584,23 @@
     if(!ins) return 0;
     return (Number(ins.remaining)||0) > 0 ? (Number(ins.perAmount)||0) : 0;
   }
+  function loanItemPaidCount(itemId){
+    let count = 0;
+    Object.keys(data.tx).forEach(mk=>{
+      (data.tx[mk]||[]).forEach(t=>{
+        if(t.loanItemId===itemId) count++;
+      });
+    });
+    return count;
+  }
+  function loanItemRemaining(item){
+    return Math.max(0, (Number(item.initialRemaining)||0) - loanItemPaidCount(item.id));
+  }
+  function loanItemsMonthlyTotal(settings){
+    return (settings.loanItems||[]).reduce((sum,item)=>{
+      return sum + (loanItemRemaining(item)>0 ? (Number(item.perAmount)||0) : 0);
+    },0);
+  }
   function allocatable(settings){
     const fixedTotal = (settings.fixed||[]).reduce((s,f)=>s+(Number(f.amount)||0),0);
     const customTotal = (settings.customSavings||[]).reduce((s,f)=>s+(Number(f.amount)||0),0);
@@ -570,10 +608,11 @@
     const repayment = Number(settings.credit && settings.credit.repayment)||0;
     const ins = settings.insurance || {};
     const insTotal = insuranceMonthly(ins.mine) + insuranceMonthly(ins.spouse);
-    return (Number(settings.income)||0) + balanceTotal - fixedTotal - (Number(settings.filial)||0) - (Number(settings.savings)||0) - (Number(settings.reserve)||0) - customTotal - repayment - insTotal;
+    const loanTotal = loanItemsMonthlyTotal(settings);
+    return (Number(settings.income)||0) + balanceTotal - fixedTotal - (Number(settings.filial)||0) - (Number(settings.savings)||0) - (Number(settings.reserve)||0) - customTotal - repayment - insTotal - loanTotal;
   }
 
-  function isExpenseTx(t){ return t.type !== 'income'; }
+  function isExpenseTx(t){ return t.type !== 'income' && !t.loanItemId; }
   function isIncomeTx(t){ return t.type === 'income'; }
   function incomeTxTotalForMonth(monthKey){
     return (data.tx[monthKey]||[]).filter(isIncomeTx).reduce((s,t)=>s+t.amount,0);
@@ -605,6 +644,10 @@
   }
   function totalPendingReimburseAmount(){
     return getAllPendingReimbursements().reduce((s,t)=>s+t.amount,0);
+  }
+  function loanItemNameById(id){
+    const item = (data.settings.loanItems||[]).find(li=>li.id===id);
+    return item ? item.name : '';
   }
   function getMonthTx(monthKey){
     return data.tx[monthKey] || [];
@@ -792,11 +835,98 @@
     refreshChips(); refreshSuggest();
   }
 
+  // ---------- 自訂分期項目清單(可自由新增/刪除) ----------
+  function renderLoanItemsList(containerId, items, onChange){
+    const el = $(containerId);
+    el.innerHTML = '';
+    items.forEach((item, idx)=>{
+      const div = document.createElement('div');
+      div.className = 'mini-card';
+      div.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="mc-title">分期項目</div>
+          <button type="button" class="loan-del" style="background:none;border:1px solid var(--line);color:var(--text-dim);border-radius:8px;padding:4px 10px;font-size:12px;">✕ 刪除</button>
+        </div>
+        <label>項目名稱</label>
+        <input type="text" class="loan-name" placeholder="例如:iPhone" value="${item.name||''}">
+        <label>刷了哪張卡</label>
+        <input type="text" class="loan-card" list="dl-card-names" placeholder="例如:台新信用卡" value="${item.card||''}">
+        <label>總金額</label>
+        <input type="number" class="loan-total" value="${item.total||''}">
+        <label>分期期數</label>
+        <input type="number" class="loan-installments" placeholder="例如 6" value="${item.installments||''}">
+        <div class="mc-suggest"><span class="sugg-text"></span><br><button type="button" class="sugg-apply">套用建議</button></div>
+        <div class="two-in-row">
+          <div><label>剩餘期數</label><input type="number" class="loan-remaining" value="${item.initialRemaining||''}"></div>
+          <div><label>每期金額</label><input type="number" class="loan-per" value="${item.perAmount||''}"></div>
+        </div>
+        <div class="readout loan-paid-info"></div>
+      `;
+      const nameInp = div.querySelector('.loan-name');
+      const cardInp = div.querySelector('.loan-card');
+      const totalInp = div.querySelector('.loan-total');
+      const instInp = div.querySelector('.loan-installments');
+      const remInp = div.querySelector('.loan-remaining');
+      const perInp = div.querySelector('.loan-per');
+      const suggText = div.querySelector('.sugg-text');
+      const suggBtn = div.querySelector('.sugg-apply');
+      const delBtn = div.querySelector('.loan-del');
+      const paidInfo = div.querySelector('.loan-paid-info');
+
+      function refreshSuggest(){
+        const total = Number(totalInp.value)||0;
+        const n = Number(instInp.value)||0;
+        if(total>0 && n>0){
+          const base = Math.floor(total/n);
+          const rem = total - base*n;
+          suggText.textContent = rem>0
+            ? `建議:每期 $${fmt(base)},首期 $${fmt(base+rem)}`
+            : `建議:每期 $${fmt(base)}`;
+        }else{
+          suggText.textContent = '輸入總金額與期數後會顯示建議';
+        }
+      }
+      function refreshPaidInfo(){
+        if(!item.id){ paidInfo.textContent=''; return; }
+        const paid = loanItemPaidCount(item.id);
+        const initial = Number(remInp.value)||0;
+        const left = Math.max(0, initial - paid);
+        paidInfo.textContent = `已繳 ${paid} 期,剩 ${left} 期未繳`;
+      }
+      nameInp.addEventListener('input', ()=>{ item.name = nameInp.value; onChange(); });
+      cardInp.addEventListener('input', ()=>{ item.card = cardInp.value; onChange(); });
+      totalInp.addEventListener('input', ()=>{ item.total = totalInp.value; refreshSuggest(); onChange(); });
+      instInp.addEventListener('input', ()=>{ item.installments = instInp.value; refreshSuggest(); onChange(); });
+      remInp.addEventListener('input', ()=>{ item.initialRemaining = remInp.value; refreshPaidInfo(); onChange(); });
+      perInp.addEventListener('input', ()=>{ item.perAmount = perInp.value; onChange(); });
+      suggBtn.addEventListener('click', ()=>{
+        const total = Number(totalInp.value)||0;
+        const n = Number(instInp.value)||0;
+        const base = Math.floor(total/(n||1));
+        item.initialRemaining = n;
+        item.perAmount = base;
+        remInp.value = n;
+        perInp.value = base;
+        refreshPaidInfo();
+        onChange();
+      });
+      delBtn.addEventListener('click', ()=>{
+        items.splice(idx,1);
+        renderLoanItemsList(containerId, items, onChange);
+        onChange();
+      });
+      refreshSuggest();
+      refreshPaidInfo();
+      el.appendChild(div);
+    });
+  }
+
   // ---------- SETUP SCREEN ----------
   let setupFixed = [];
   let setupCustomSavings = [];
   let setupBalances = [];
   let setupInsurance = { mine:{}, spouse:{} };
+  let setupLoanItems = [];
   function updateSetupPreview(){
     const settings = {
       income: $('s-income').value,
@@ -807,7 +937,8 @@
       reserve: $('s-reserve').value,
       customSavings: setupCustomSavings,
       credit: { repayment: $('s-credit-repayment').value },
-      insurance: setupInsurance
+      insurance: setupInsurance,
+      loanItems: setupLoanItems
     };
     const alloc = allocatable(settings);
     const dim = daysInMonth(monthKeyOf(todayISO()));
@@ -820,13 +951,16 @@
     setupCustomSavings = [];
     setupBalances = [];
     setupInsurance = { mine:{}, spouse:{} };
+    setupLoanItems = [];
     renderFixedList('s-fixed-list', setupFixed, updateSetupPreview);
     renderNamedAmountList('s-customsavings-list', setupCustomSavings, updateSetupPreview, 'dl-savings-names', '存錢地方(例如台新帳戶)');
     renderNamedAmountList('s-balances-list', setupBalances, updateSetupPreview, 'dl-account-names', '帳戶名稱(例如台新、LINE Bank)');
     buildInsuranceCard('s-ins-mine', '我的保險', setupInsurance.mine, updateSetupPreview);
     buildInsuranceCard('s-ins-spouse', '老公的保險', setupInsurance.spouse, updateSetupPreview);
+    renderLoanItemsList('s-loanitems-list', setupLoanItems, updateSetupPreview);
     updateDatalist('dl-savings-names', data.savingsNameHistory);
     updateDatalist('dl-account-names', data.accountNameHistory);
+    updateDatalist('dl-card-names', data.cardNameHistory);
     ['s-income','s-filial','s-savings','s-reserve','s-credit-limit','s-credit-used','s-credit-repayment'].forEach(id=>{
       $(id).addEventListener('input', updateSetupPreview);
     });
@@ -842,11 +976,17 @@
       setupBalances.push({id:crypto.randomUUID(), name:'', amount:''});
       renderNamedAmountList('s-balances-list', setupBalances, updateSetupPreview, 'dl-account-names', '帳戶名稱(例如台新、LINE Bank)');
     });
+    $('s-add-loanitem').addEventListener('click', ()=>{
+      setupLoanItems.push({id:crypto.randomUUID(), name:'', card:'', total:'', installments:'', initialRemaining:'', perAmount:''});
+      renderLoanItemsList('s-loanitems-list', setupLoanItems, updateSetupPreview);
+    });
     $('s-save').addEventListener('click', async ()=>{
       const customSavings = setupCustomSavings.map(f=>({id:f.id, name:f.name||'未命名', amount:Number(f.amount)||0}));
       const balances = setupBalances.map(f=>({id:f.id, name:f.name||'未命名', amount:Number(f.amount)||0}));
+      const loanItems = setupLoanItems.map(f=>({id:f.id, name:f.name||'未命名', card:f.card||'', total:Number(f.total)||0, installments:Number(f.installments)||0, initialRemaining:Number(f.initialRemaining)||0, perAmount:Number(f.perAmount)||0}));
       rememberNames('savingsNameHistory', customSavings);
       rememberNames('accountNameHistory', balances);
+      rememberNames('cardNameHistory', loanItems.map(f=>({name:f.card})));
       data.settings = {
         income: Number($('s-income').value)||0,
         incomeAccount: $('s-income-account').value || '台新',
@@ -864,7 +1004,8 @@
         insurance: {
           mine: { total:Number(setupInsurance.mine.total)||0, installments:Number(setupInsurance.mine.installments)||12, remaining:Number(setupInsurance.mine.remaining)||0, perAmount:Number(setupInsurance.mine.perAmount)||0 },
           spouse: { total:Number(setupInsurance.spouse.total)||0, installments:Number(setupInsurance.spouse.installments)||12, remaining:Number(setupInsurance.spouse.remaining)||0, perAmount:Number(setupInsurance.spouse.perAmount)||0 }
-        }
+        },
+        loanItems: loanItems
       };
       await saveData();
       goTab('today');
@@ -878,6 +1019,7 @@
   let settingsCustomSavings = [];
   let settingsBalances = [];
   let settingsInsurance = { mine:{}, spouse:{} };
+  let settingsLoanItems = [];
   function updateSettingsPreview(){
     const settings = {
       income: $('c-income').value,
@@ -888,7 +1030,8 @@
       reserve: $('c-reserve').value,
       customSavings: settingsCustomSavings,
       credit: { repayment: $('c-credit-repayment').value },
-      insurance: settingsInsurance
+      insurance: settingsInsurance,
+      loanItems: settingsLoanItems
     };
     const alloc = allocatable(settings);
     const dim = daysInMonth(monthKeyOf(todayISO()));
@@ -910,6 +1053,7 @@
     renderNamedAmountList('c-balances-list', settingsBalances, updateSettingsPreview, 'dl-account-names', '帳戶名稱(例如台新、LINE Bank)');
     updateDatalist('dl-savings-names', data.savingsNameHistory);
     updateDatalist('dl-account-names', data.accountNameHistory);
+    updateDatalist('dl-card-names', data.cardNameHistory);
     fillSelect($('c-income-account'), accountNameList(settingsBalances), s.incomeAccount || '台新');
     const credit = s.credit || {limit:50000, used:0, repayment:0};
     $('c-credit-limit').value = credit.limit || '';
@@ -919,6 +1063,8 @@
     settingsInsurance = { mine:{...ins.mine}, spouse:{...ins.spouse} };
     buildInsuranceCard('c-ins-mine', '我的保險', settingsInsurance.mine, updateSettingsPreview);
     buildInsuranceCard('c-ins-spouse', '老公的保險', settingsInsurance.spouse, updateSettingsPreview);
+    settingsLoanItems = (s.loanItems||[]).map(f=>({...f}));
+    renderLoanItemsList('c-loanitems-list', settingsLoanItems, updateSettingsPreview);
     updateSettingsPreview();
   }
   function initSettingsScreen(){
@@ -937,11 +1083,17 @@
       settingsBalances.push({id:crypto.randomUUID(), name:'', amount:''});
       renderNamedAmountList('c-balances-list', settingsBalances, updateSettingsPreview, 'dl-account-names', '帳戶名稱(例如台新、LINE Bank)');
     });
+    $('c-add-loanitem').addEventListener('click', ()=>{
+      settingsLoanItems.push({id:crypto.randomUUID(), name:'', card:'', total:'', installments:'', initialRemaining:'', perAmount:''});
+      renderLoanItemsList('c-loanitems-list', settingsLoanItems, updateSettingsPreview);
+    });
     $('c-save').addEventListener('click', async ()=>{
       const customSavings = settingsCustomSavings.map(f=>({id:f.id, name:f.name||'未命名', amount:Number(f.amount)||0}));
       const balances = settingsBalances.map(f=>({id:f.id, name:f.name||'未命名', amount:Number(f.amount)||0}));
+      const loanItems = settingsLoanItems.map(f=>({id:f.id, name:f.name||'未命名', card:f.card||'', total:Number(f.total)||0, installments:Number(f.installments)||0, initialRemaining:Number(f.initialRemaining)||0, perAmount:Number(f.perAmount)||0}));
       rememberNames('savingsNameHistory', customSavings);
       rememberNames('accountNameHistory', balances);
+      rememberNames('cardNameHistory', loanItems.map(f=>({name:f.card})));
       data.settings = {
         income: Number($('c-income').value)||0,
         incomeAccount: $('c-income-account').value || '台新',
@@ -959,7 +1111,8 @@
         insurance: {
           mine: { total:Number(settingsInsurance.mine.total)||0, installments:Number(settingsInsurance.mine.installments)||12, remaining:Number(settingsInsurance.mine.remaining)||0, perAmount:Number(settingsInsurance.mine.perAmount)||0 },
           spouse: { total:Number(settingsInsurance.spouse.total)||0, installments:Number(settingsInsurance.spouse.installments)||12, remaining:Number(settingsInsurance.spouse.remaining)||0, perAmount:Number(settingsInsurance.spouse.perAmount)||0 }
-        }
+        },
+        loanItems: loanItems
       };
       await saveData();
       showToast('已儲存');
@@ -981,6 +1134,8 @@
     fillSelect($('t-input-expense-account'), accNames);
     fillSelect($('t-input-account'), accNames, s.incomeAccount);
     if(!$('t-input-date').value) $('t-input-date').value = today;
+    const loanItems = s.loanItems || [];
+    $('t-input-loanitem').innerHTML = loanItems.map(li=>`<option value="${li.id}">${li.name}${loanItemRemaining(li)>0 ? '(剩'+loanItemRemaining(li)+'期)' : '(已繳清)'}</option>`).join('') || '<option value="">尚未新增分期項目</option>';
 
     const spentToday = tx.filter(t=>t.date === today && isExpenseTx(t)).reduce((sum,t)=>sum+t.amount,0);
     const remainingDaysIncludingToday = dim - dom + 1;
@@ -1019,7 +1174,7 @@
         row.className = 'tx-item';
         const time = new Date(t.ts).toLocaleTimeString('zh-Hant-TW',{hour:'2-digit',minute:'2-digit'});
         const income = isIncomeTx(t);
-        const noteText = income ? (t.note ? t.note : '收入') + (t.account ? `(存入${t.account})` : '') : (t.note ? t.note : '花費') + (t.account ? `(${t.account}扣款)` : '');
+        const noteText = income ? (t.note ? t.note : '收入') + (t.account ? `(存入${t.account})` : '') : (t.note ? t.note : '花費') + (t.account ? `(${t.account}扣款)` : '') + (t.loanItemId ? `[分期:${loanItemNameById(t.loanItemId)}]` : '');
         row.innerHTML = `
           <div>
             <div class="tx-note">${noteText}</div>
@@ -1052,6 +1207,8 @@
     const accountInp = $('t-input-account');
     const expenseAccInp = $('t-input-expense-account');
     const dateInp = $('t-input-date');
+    const isLoanInp = $('t-input-is-loan');
+    const loanSelectInp = $('t-input-loanitem');
     const amount = Number(amtInp.value);
     if(!amount || amount<=0){ showToast('請輸入金額'); return; }
     const chosenDate = dateInp.value || todayISO();
@@ -1074,6 +1231,11 @@
       tx.reimbursable = reimburseInp.checked;
       tx.receivedDate = null;
       reimburseInp.checked = false;
+      if(isLoanInp.checked && loanSelectInp.value){
+        tx.loanItemId = loanSelectInp.value;
+      }
+      isLoanInp.checked = false;
+      $('t-loan-select-wrap').style.display = 'none';
     }
     data.tx[mKey].push(tx);
     amtInp.value = '';
@@ -1100,6 +1262,7 @@
     const repayment = Number(s.credit && s.credit.repayment)||0;
     const insMine = insuranceMonthly(s.insurance && s.insurance.mine);
     const insSpouse = insuranceMonthly(s.insurance && s.insurance.spouse);
+    const loanTotalDeduct = loanItemsMonthlyTotal(s);
     const reimbursedIn = reimbursementIncomeForMonth(mKey);
     const incomeTxIn = incomeTxTotalForMonth(mKey);
     const summary = $('m-summary');
@@ -1112,6 +1275,7 @@
       <div class="ms-row"><span class="l">孝親費</span><span class="v num">-$${fmt(s.filial||0)}</span></div>
       <div class="ms-row"><span class="l">保險費(我)</span><span class="v num">-$${fmt(insMine)}</span></div>
       <div class="ms-row"><span class="l">保險費(老公)</span><span class="v num">-$${fmt(insSpouse)}</span></div>
+      <div class="ms-row"><span class="l">分期付款</span><span class="v num">-$${fmt(loanTotalDeduct)}</span></div>
       <div class="ms-row"><span class="l">信貸還款</span><span class="v num">-$${fmt(repayment)}</span></div>
       <div class="ms-row"><span class="l">存款目標</span><span class="v num">-$${fmt(s.savings)}</span></div>
       <div class="ms-row"><span class="l">預備金</span><span class="v num">-$${fmt(s.reserve)}</span></div>
@@ -1155,6 +1319,20 @@
       }
       crEl.innerHTML = `<div class="h">循環信貸剩餘額度</div><div class="v num">$${fmt((s.credit.limit||0)-(s.credit.used||0))}</div>`;
     }
+    if((s.loanItems||[]).length){
+      let loanEl = $('m-loanitems');
+      if(!loanEl){
+        loanEl = document.createElement('div');
+        loanEl.id = 'm-loanitems';
+        loanEl.className = 'overview-card';
+        summary.insertAdjacentElement('afterend', loanEl);
+      }
+      loanEl.innerHTML = '<div class="h">分期項目</div>' + s.loanItems.map(li=>{
+        const paid = loanItemPaidCount(li.id);
+        const left = loanItemRemaining(li);
+        return `<div class="savings-list-item"><span>${li.name}${li.card?'('+li.card+')':''}</span><span class="num">$${fmt(li.perAmount)}/期,剩${left}期(已繳${paid}/${li.installments||0})</span></div>`;
+      }).join('');
+    }
 
     // 歷月結餘累加(用目前設定估算每個月的可分配預算,精準的歷史設定快照下一版會補上)
     let totalLeftover = 0;
@@ -1196,7 +1374,7 @@
         row.className = 'tx-item';
         const dstr = t.date.slice(5).replace('-','/');
         const income = isIncomeTx(t);
-        const noteText = income ? (t.note ? t.note : '收入') + (t.account ? `(存入${t.account})` : '') : (t.note ? t.note : '花費') + (t.account ? `(${t.account}扣款)` : '');
+        const noteText = income ? (t.note ? t.note : '收入') + (t.account ? `(存入${t.account})` : '') : (t.note ? t.note : '花費') + (t.account ? `(${t.account}扣款)` : '') + (t.loanItemId ? `[分期:${loanItemNameById(t.loanItemId)}]` : '');
         row.innerHTML = `
           <div>
             <div class="tx-note">${noteText}</div>
@@ -1243,8 +1421,13 @@
       document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active', b===btn));
       $('t-income-account-wrap').style.display = txMode==='income' ? '' : 'none';
       $('t-reimburse-wrap').style.display = txMode==='income' ? 'none' : '';
+      $('t-loan-check-wrap').style.display = txMode==='income' ? 'none' : '';
+      if(txMode==='income'){ $('t-input-is-loan').checked = false; $('t-loan-select-wrap').style.display = 'none'; }
       $('t-input-amount').placeholder = txMode==='income' ? '收入金額' : '金額';
     });
+  });
+  $('t-input-is-loan').addEventListener('change', ()=>{
+    $('t-loan-select-wrap').style.display = $('t-input-is-loan').checked ? '' : 'none';
   });
   $('t-input-amount').addEventListener('keydown', (e)=>{ if(e.key==='Enter') addTransaction(); });
   $('t-input-note').addEventListener('keydown', (e)=>{ if(e.key==='Enter') addTransaction(); });
@@ -1270,6 +1453,7 @@
     if(!data.tx) data.tx = {};
     if(!data.savingsNameHistory) data.savingsNameHistory = [];
     if(!data.accountNameHistory) data.accountNameHistory = [];
+    if(!data.cardNameHistory) data.cardNameHistory = [];
     await saveData();
     renderAll();
   }
@@ -1364,6 +1548,7 @@
       if(!data.tx) data.tx = {};
       if(!data.savingsNameHistory) data.savingsNameHistory = [];
       if(!data.accountNameHistory) data.accountNameHistory = [];
+    if(!data.cardNameHistory) data.cardNameHistory = [];
       showToast('已自動從備份還原');
     }catch(e){ /* 還原失敗就當作沒有,不影響正常開啟 */ }
   }
